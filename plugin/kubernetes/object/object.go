@@ -22,8 +22,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// ToFunc converts one empty interface to another.
-type ToFunc func(interface{}) interface{}
+// ToFunc converts one v1.Object to another v1.Object.
+type ToFunc func(v1.Object) (v1.Object, error)
 
 // ProcessorBuilder returns function to process cache events.
 type ProcessorBuilder func(cache.Indexer, cache.ResourceEventHandler) cache.ProcessFunc
@@ -88,12 +88,6 @@ func (e *Empty) GetAnnotations() map[string]string { return nil }
 // SetAnnotations implements the metav1.Object interface.
 func (e *Empty) SetAnnotations(annotations map[string]string) {}
 
-// GetInitializers implements the metav1.Object interface.
-func (e *Empty) GetInitializers() *v1.Initializers { return nil }
-
-// SetInitializers implements the metav1.Object interface.
-func (e *Empty) SetInitializers(initializers *v1.Initializers) {}
-
 // GetFinalizers implements the metav1.Object interface.
 func (e *Empty) GetFinalizers() []string { return nil }
 
@@ -106,11 +100,11 @@ func (e *Empty) GetOwnerReferences() []v1.OwnerReference { return nil }
 // SetOwnerReferences implements the metav1.Object interface.
 func (e *Empty) SetOwnerReferences([]v1.OwnerReference) {}
 
-// GetClusterName implements the metav1.Object interface.
-func (e *Empty) GetClusterName() string { return "" }
+// GetZZZ_DeprecatedClusterName implements the metav1.Object interface.
+func (e *Empty) GetZZZ_DeprecatedClusterName() string { return "" }
 
-// SetClusterName implements the metav1.Object interface.
-func (e *Empty) SetClusterName(clusterName string) {}
+// SetZZZ_DeprecatedClusterName implements the metav1.Object interface.
+func (e *Empty) SetZZZ_DeprecatedClusterName(clusterName string) {}
 
 // GetManagedFields implements the metav1.Object interface.
 func (e *Empty) GetManagedFields() []v1.ManagedFieldsEntry { return nil }

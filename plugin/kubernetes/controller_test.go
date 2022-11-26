@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/coredns/coredns/plugin/kubernetes/object"
 	"github.com/coredns/coredns/plugin/test"
 
 	"github.com/miekg/dns"
@@ -29,7 +30,8 @@ func BenchmarkController(b *testing.B) {
 	dco := dnsControlOpts{
 		zones: []string{"cluster.local."},
 	}
-	controller := newdnsController(client, dco)
+	ctx := context.Background()
+	controller := newdnsController(ctx, client, dco)
 	cidr := "10.0.0.0/19"
 
 	// Add resources
@@ -39,7 +41,6 @@ func BenchmarkController(b *testing.B) {
 	m.SetQuestion("svc1.testns.svc.cluster.local.", dns.TypeA)
 	k := New([]string{"cluster.local."})
 	k.APIConn = controller
-	ctx := context.Background()
 	rw := &test.ResponseWriter{}
 
 	b.ResetTimer()
@@ -70,6 +71,7 @@ func generateEndpoints(cidr string, client kubernetes.Interface) {
 			Namespace: "testns",
 		},
 	}
+	ctx := context.TODO()
 	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
 		ep.Subsets[0].Addresses = []api.EndpointAddress{
 			{
@@ -78,7 +80,7 @@ func generateEndpoints(cidr string, client kubernetes.Interface) {
 			},
 		}
 		ep.ObjectMeta.Name = "svc" + strconv.Itoa(count)
-		client.CoreV1().Endpoints("testns").Create(ep)
+		client.CoreV1().Endpoints("testns").Create(ctx, ep, meta.CreateOptions{})
 		count++
 	}
 }
@@ -121,7 +123,8 @@ func generateSvcs(cidr string, svcType string, client kubernetes.Interface) {
 }
 
 func createClusterIPSvc(suffix int, client kubernetes.Interface, ip net.IP) {
-	client.CoreV1().Services("testns").Create(&api.Service{
+	ctx := context.TODO()
+	client.CoreV1().Services("testns").Create(ctx, &api.Service{
 		ObjectMeta: meta.ObjectMeta{
 			Name:      "svc" + strconv.Itoa(suffix),
 			Namespace: "testns",
@@ -134,11 +137,12 @@ func createClusterIPSvc(suffix int, client kubernetes.Interface, ip net.IP) {
 				Port:     80,
 			}},
 		},
-	})
+	}, meta.CreateOptions{})
 }
 
 func createHeadlessSvc(suffix int, client kubernetes.Interface, ip net.IP) {
-	client.CoreV1().Services("testns").Create(&api.Service{
+	ctx := context.TODO()
+	client.CoreV1().Services("testns").Create(ctx, &api.Service{
 		ObjectMeta: meta.ObjectMeta{
 			Name:      "hdls" + strconv.Itoa(suffix),
 			Namespace: "testns",
@@ -146,11 +150,12 @@ func createHeadlessSvc(suffix int, client kubernetes.Interface, ip net.IP) {
 		Spec: api.ServiceSpec{
 			ClusterIP: api.ClusterIPNone,
 		},
-	})
+	}, meta.CreateOptions{})
 }
 
 func createExternalSvc(suffix int, client kubernetes.Interface, ip net.IP) {
-	client.CoreV1().Services("testns").Create(&api.Service{
+	ctx := context.TODO()
+	client.CoreV1().Services("testns").Create(ctx, &api.Service{
 		ObjectMeta: meta.ObjectMeta{
 			Name:      "external" + strconv.Itoa(suffix),
 			Namespace: "testns",
@@ -164,5 +169,70 @@ func createExternalSvc(suffix int, client kubernetes.Interface, ip net.IP) {
 			}},
 			Type: api.ServiceTypeExternalName,
 		},
-	})
+	}, meta.CreateOptions{})
+}
+
+func TestServiceModified(t *testing.T) {
+	var tests = []struct {
+		oldSvc   interface{}
+		newSvc   interface{}
+		ichanged bool
+		echanged bool
+	}{
+		{
+			oldSvc:   nil,
+			newSvc:   &object.Service{},
+			ichanged: true,
+			echanged: false,
+		},
+		{
+			oldSvc:   &object.Service{},
+			newSvc:   nil,
+			ichanged: true,
+			echanged: false,
+		},
+		{
+			oldSvc:   nil,
+			newSvc:   &object.Service{ExternalIPs: []string{"10.0.0.1"}},
+			ichanged: true,
+			echanged: true,
+		},
+		{
+			oldSvc:   &object.Service{ExternalIPs: []string{"10.0.0.1"}},
+			newSvc:   nil,
+			ichanged: true,
+			echanged: true,
+		},
+		{
+			oldSvc:   &object.Service{ExternalIPs: []string{"10.0.0.1"}},
+			newSvc:   &object.Service{ExternalIPs: []string{"10.0.0.2"}},
+			ichanged: false,
+			echanged: true,
+		},
+		{
+			oldSvc:   &object.Service{ExternalName: "10.0.0.1"},
+			newSvc:   &object.Service{ExternalName: "10.0.0.2"},
+			ichanged: true,
+			echanged: false,
+		},
+		{
+			oldSvc:   &object.Service{Ports: []api.ServicePort{{Name: "test1"}}},
+			newSvc:   &object.Service{Ports: []api.ServicePort{{Name: "test2"}}},
+			ichanged: true,
+			echanged: true,
+		},
+		{
+			oldSvc:   &object.Service{Ports: []api.ServicePort{{Name: "test1"}}},
+			newSvc:   &object.Service{Ports: []api.ServicePort{{Name: "test2"}, {Name: "test3"}}},
+			ichanged: true,
+			echanged: true,
+		},
+	}
+
+	for i, test := range tests {
+		ichanged, echanged := serviceModified(test.oldSvc, test.newSvc)
+		if test.ichanged != ichanged || test.echanged != echanged {
+			t.Errorf("Expected %v, %v for test %v. Got %v, %v", test.ichanged, test.echanged, i, ichanged, echanged)
+		}
+	}
 }

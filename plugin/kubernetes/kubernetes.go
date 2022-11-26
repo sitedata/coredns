@@ -6,18 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/etcd/msg"
 	"github.com/coredns/coredns/plugin/kubernetes/object"
 	"github.com/coredns/coredns/plugin/pkg/dnsutil"
 	"github.com/coredns/coredns/plugin/pkg/fall"
-	"github.com/coredns/coredns/plugin/pkg/upstream"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
 	api "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
+	discoveryV1beta1 "k8s.io/api/discovery/v1beta1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
@@ -30,7 +34,7 @@ import (
 type Kubernetes struct {
 	Next             plugin.Handler
 	Zones            []string
-	Upstream         *upstream.Upstream
+	Upstream         Upstreamer
 	APIServerList    []string
 	APICertAuth      string
 	APIClientCert    string
@@ -46,7 +50,11 @@ type Kubernetes struct {
 	primaryZoneIndex int
 	localIPs         []net.IP
 	autoPathSearch   []string // Local search path from /etc/resolv.conf. Needed for autopath.
-	TransferTo       []string
+}
+
+// Upstreamer is used to resolve CNAME or other external targets
+type Upstreamer interface {
+	Lookup(ctx context.Context, state request.Request, name string, typ uint16) (*dns.Msg, error)
 }
 
 // New returns a initialized Kubernetes. It default interfaceAddrFunc to return 127.0.0.1. All other
@@ -69,7 +77,7 @@ const (
 	// podModeInsecure is where pod requests are answered without verifying they exist
 	podModeInsecure = "insecure"
 	// DNSSchemaVersion is the schema version: https://github.com/kubernetes/dns/blob/master/docs/specification.md
-	DNSSchemaVersion = "1.0.1"
+	DNSSchemaVersion = "1.1.0"
 	// Svc is the DNS schema for kubernetes services
 	Svc = "svc"
 	// Pod is the DNS schema for kubernetes pods
@@ -88,7 +96,6 @@ var (
 func (k *Kubernetes) Services(ctx context.Context, state request.Request, exact bool, opt plugin.Options) (svcs []msg.Service, err error) {
 	// We're looking again at types, which we've already done in ServeDNS, but there are some types k8s just can't answer.
 	switch state.QType() {
-
 	case dns.TypeTXT:
 		// 1 label + zone, label must be "dns-version".
 		t, _ := dnsutil.TrimZone(state.Name(), state.Zone)
@@ -105,7 +112,7 @@ func (k *Kubernetes) Services(ctx context.Context, state request.Request, exact 
 
 	case dns.TypeNS:
 		// We can only get here if the qname equals the zone, see ServeDNS in handler.go.
-		nss := k.nsAddrs(false, state.Zone)
+		nss := k.nsAddrs(false, false, state.Zone)
 		var svcs []msg.Service
 		for _, ns := range nss {
 			if ns.Header().Rrtype == dns.TypeA {
@@ -120,7 +127,7 @@ func (k *Kubernetes) Services(ctx context.Context, state request.Request, exact 
 	}
 
 	if isDefaultNS(state.Name(), state.Zone) {
-		nss := k.nsAddrs(false, state.Zone)
+		nss := k.nsAddrs(false, false, state.Zone)
 		var svcs []msg.Service
 		for _, ns := range nss {
 			if ns.Header().Rrtype == dns.TypeA && state.QType() == dns.TypeA {
@@ -208,26 +215,25 @@ func (k *Kubernetes) getClientConfig() (*rest.Config, error) {
 	}
 	cc.ContentType = "application/vnd.kubernetes.protobuf"
 	return cc, err
-
 }
 
 // InitKubeCache initializes a new Kubernetes cache.
-func (k *Kubernetes) InitKubeCache() (err error) {
+func (k *Kubernetes) InitKubeCache(ctx context.Context) (onStart func() error, onShut func() error, err error) {
 	config, err := k.getClientConfig()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	kubeClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to create kubernetes notification controller: %q", err)
+		return nil, nil, fmt.Errorf("failed to create kubernetes notification controller: %q", err)
 	}
 
 	if k.opts.labelSelector != nil {
 		var selector labels.Selector
 		selector, err = meta.LabelSelectorAsSelector(k.opts.labelSelector)
 		if err != nil {
-			return fmt.Errorf("unable to create Selector for LabelSelector '%s': %q", k.opts.labelSelector, err)
+			return nil, nil, fmt.Errorf("unable to create Selector for LabelSelector '%s': %q", k.opts.labelSelector, err)
 		}
 		k.opts.selector = selector
 	}
@@ -236,7 +242,7 @@ func (k *Kubernetes) InitKubeCache() (err error) {
 		var selector labels.Selector
 		selector, err = meta.LabelSelectorAsSelector(k.opts.namespaceLabelSelector)
 		if err != nil {
-			return fmt.Errorf("unable to create Selector for LabelSelector '%s': %q", k.opts.namespaceLabelSelector, err)
+			return nil, nil, fmt.Errorf("unable to create Selector for LabelSelector '%s': %q", k.opts.namespaceLabelSelector, err)
 		}
 		k.opts.namespaceSelector = selector
 	}
@@ -245,14 +251,123 @@ func (k *Kubernetes) InitKubeCache() (err error) {
 
 	k.opts.zones = k.Zones
 	k.opts.endpointNameMode = k.endpointNameMode
-	k.APIConn = newdnsController(kubeClient, k.opts)
 
-	return err
+	k.APIConn = newdnsController(ctx, kubeClient, k.opts)
+
+	initEndpointWatch := k.opts.initEndpointsCache
+
+	onStart = func() error {
+		go func() {
+			if initEndpointWatch {
+				// Revert to watching Endpoints for incompatible K8s.
+				// This can be removed when all supported k8s versions support endpointslices.
+				ok, v := k.endpointSliceSupported(kubeClient)
+				if !ok {
+					k.APIConn.(*dnsControl).WatchEndpoints(ctx)
+				}
+				// Revert to EndpointSlice v1beta1 if v1 is not supported
+				if ok && v == discoveryV1beta1.SchemeGroupVersion.String() {
+					k.APIConn.(*dnsControl).WatchEndpointSliceV1beta1(ctx)
+				}
+			}
+			k.APIConn.Run()
+		}()
+
+		timeout := 5 * time.Second
+		timeoutTicker := time.NewTicker(timeout)
+		defer timeoutTicker.Stop()
+		logDelay := 500 * time.Millisecond
+		logTicker := time.NewTicker(logDelay)
+		defer logTicker.Stop()
+		checkSyncTicker := time.NewTicker(100 * time.Millisecond)
+		defer checkSyncTicker.Stop()
+		for {
+			select {
+			case <-checkSyncTicker.C:
+				if k.APIConn.HasSynced() {
+					return nil
+				}
+			case <-logTicker.C:
+				log.Info("waiting for Kubernetes API before starting server")
+			case <-timeoutTicker.C:
+				log.Warning("starting server with unsynced Kubernetes API")
+				return nil
+			}
+		}
+	}
+
+	onShut = func() error {
+		return k.APIConn.Stop()
+	}
+
+	return onStart, onShut, err
+}
+
+// endpointSliceSupported will determine which endpoint object type to watch (endpointslices or endpoints)
+// based on the supportability of endpointslices in the API and server version. It will return true when endpointslices
+// should be watched, and false when endpoints should be watched.
+// If the API supports discovery, and the server versions >= 1.19, true is returned.
+// Also returned is the discovery version supported: "v1" if v1 is supported, and v1beta1 if v1beta1 is supported and
+// v1 is not supported.
+// This function should be removed, when all supported versions of k8s support v1.
+func (k *Kubernetes) endpointSliceSupported(kubeClient *kubernetes.Clientset) (bool, string) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	logTicker := time.NewTicker(10 * time.Second)
+	defer logTicker.Stop()
+	var connErr error
+	for {
+		select {
+		case <-logTicker.C:
+			if connErr == nil {
+				continue
+			}
+			log.Warningf("Kubernetes API connection failure: %v", connErr)
+		case <-ticker.C:
+			sv, err := kubeClient.ServerVersion()
+			if err != nil {
+				connErr = err
+				continue
+			}
+
+			// Disable use of endpoint slices for k8s versions 1.18 and earlier. The Endpointslices API was enabled
+			// by default in 1.17 but Service -> Pod proxy continued to use Endpoints by default until 1.19.
+			// DNS results should be built from the same source data that the proxy uses.  This decision assumes
+			// k8s EndpointSliceProxying feature gate is at the default (i.e. only enabled for k8s >= 1.19).
+			major, _ := strconv.Atoi(sv.Major)
+			minor, _ := strconv.Atoi(strings.TrimRight(sv.Minor, "+"))
+			if major <= 1 && minor <= 18 {
+				log.Info("Watching Endpoints instead of EndpointSlices in k8s versions < 1.19")
+				return false, ""
+			}
+
+			// Enable use of endpoint slices if the API supports the discovery api
+			_, err = kubeClient.Discovery().ServerResourcesForGroupVersion(discovery.SchemeGroupVersion.String())
+			if err == nil {
+				return true, discovery.SchemeGroupVersion.String()
+			} else if !kerrors.IsNotFound(err) {
+				connErr = err
+				continue
+			}
+
+			_, err = kubeClient.Discovery().ServerResourcesForGroupVersion(discoveryV1beta1.SchemeGroupVersion.String())
+			if err == nil {
+				return true, discoveryV1beta1.SchemeGroupVersion.String()
+			} else if !kerrors.IsNotFound(err) {
+				connErr = err
+				continue
+			}
+
+			// Disable use of endpoint slices in case that it is disabled in k8s versions 1.19 and newer.
+			log.Info("Endpointslices API disabled. Watching Endpoints instead.")
+			return false, ""
+		}
+	}
 }
 
 // Records looks up services in kubernetes.
 func (k *Kubernetes) Records(ctx context.Context, state request.Request, exact bool) ([]msg.Service, error) {
-	r, e := parseRequest(state)
+	r, e := parseRequest(state.Name(), state.Zone)
 	if e != nil {
 		return nil, e
 	}
@@ -264,7 +379,7 @@ func (k *Kubernetes) Records(ctx context.Context, state request.Request, exact b
 		return nil, errNoItems
 	}
 
-	if !wildcard(r.namespace) && !k.namespaceExposed(r.namespace) {
+	if !k.namespaceExposed(r.namespace) {
 		return nil, errNsNotExposed
 	}
 
@@ -299,7 +414,7 @@ func (k *Kubernetes) findPods(r recordRequest, zone string) (pods []msg.Service,
 	}
 
 	namespace := r.namespace
-	if !wildcard(namespace) && !k.namespaceExposed(namespace) {
+	if !k.namespaceExposed(namespace) {
 		return nil, errNoItems
 	}
 
@@ -307,7 +422,7 @@ func (k *Kubernetes) findPods(r recordRequest, zone string) (pods []msg.Service,
 
 	// handle empty pod name
 	if podname == "" {
-		if k.namespaceExposed(namespace) || wildcard(namespace) {
+		if k.namespaceExposed(namespace) {
 			// NODATA
 			return nil, nil
 		}
@@ -318,13 +433,13 @@ func (k *Kubernetes) findPods(r recordRequest, zone string) (pods []msg.Service,
 	zonePath := msg.Path(zone, coredns)
 	ip := ""
 	if strings.Count(podname, "-") == 3 && !strings.Contains(podname, "--") {
-		ip = strings.Replace(podname, "-", ".", -1)
+		ip = strings.ReplaceAll(podname, "-", ".")
 	} else {
-		ip = strings.Replace(podname, "-", ":", -1)
+		ip = strings.ReplaceAll(podname, "-", ":")
 	}
 
 	if k.podMode == podModeInsecure {
-		if !wildcard(namespace) && !k.namespaceExposed(namespace) { // no wildcard, but namespace does not exist
+		if !k.namespaceExposed(namespace) { // namespace does not exist
 			return nil, errNoItems
 		}
 
@@ -338,19 +453,8 @@ func (k *Kubernetes) findPods(r recordRequest, zone string) (pods []msg.Service,
 
 	// PodModeVerified
 	err = errNoItems
-	if wildcard(podname) && !wildcard(namespace) {
-		// If namespace exists, err should be nil, so that we return NODATA instead of NXDOMAIN
-		if k.namespaceExposed(namespace) {
-			err = nil
-		}
-	}
 
 	for _, p := range k.APIConn.PodIndex(ip) {
-		// If namespace has a wildcard, filter results against Corefile namespace list.
-		if wildcard(namespace) && !k.namespaceExposed(p.Namespace) {
-			continue
-		}
-
 		// check for matching ip and namespace
 		if ip == p.PodIP && match(namespace, p.Namespace) {
 			s := msg.Service{Key: strings.Join([]string{zonePath, Pod, namespace, podname}, "/"), Host: ip, TTL: k.ttl}
@@ -364,13 +468,13 @@ func (k *Kubernetes) findPods(r recordRequest, zone string) (pods []msg.Service,
 
 // findServices returns the services matching r from the cache.
 func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.Service, err error) {
-	if !wildcard(r.namespace) && !k.namespaceExposed(r.namespace) {
+	if !k.namespaceExposed(r.namespace) {
 		return nil, errNoItems
 	}
 
 	// handle empty service name
 	if r.service == "" {
-		if k.namespaceExposed(r.namespace) || wildcard(r.namespace) {
+		if k.namespaceExposed(r.namespace) {
 			// NODATA
 			return nil, nil
 		}
@@ -379,12 +483,6 @@ func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.
 	}
 
 	err = errNoItems
-	if wildcard(r.service) && !wildcard(r.namespace) {
-		// If namespace exists, err should be nil, so that we return NODATA instead of NXDOMAIN
-		if k.namespaceExposed(r.namespace) {
-			err = nil
-		}
-	}
 
 	var (
 		endpointsListFunc func() []*object.Endpoints
@@ -392,14 +490,9 @@ func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.
 		serviceList       []*object.Service
 	)
 
-	if wildcard(r.service) || wildcard(r.namespace) {
-		serviceList = k.APIConn.ServiceList()
-		endpointsListFunc = func() []*object.Endpoints { return k.APIConn.EndpointsList() }
-	} else {
-		idx := object.ServiceKey(r.service, r.namespace)
-		serviceList = k.APIConn.SvcIndex(idx)
-		endpointsListFunc = func() []*object.Endpoints { return k.APIConn.EpIndex(idx) }
-	}
+	idx := object.ServiceKey(r.service, r.namespace)
+	serviceList = k.APIConn.SvcIndex(idx)
+	endpointsListFunc = func() []*object.Endpoints { return k.APIConn.EpIndex(idx) }
 
 	zonePath := msg.Path(zone, coredns)
 	for _, svc := range serviceList {
@@ -407,20 +500,13 @@ func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.
 			continue
 		}
 
-		// If request namespace is a wildcard, filter results against Corefile namespace list.
-		// (Namespaces without a wildcard were filtered before the call to this function.)
-		if wildcard(r.namespace) && !k.namespaceExposed(svc.Namespace) {
-			continue
-		}
-
 		// If "ignore empty_service" option is set and no endpoints exist, return NXDOMAIN unless
 		// it's a headless or externalName service (covered below).
-		if k.opts.ignoreEmptyService && svc.ClusterIP != api.ClusterIPNone && svc.Type != api.ServiceTypeExternalName {
-			// serve NXDOMAIN if no endpoint is able to answer
+		if k.opts.ignoreEmptyService && svc.Type != api.ServiceTypeExternalName && !svc.Headless() { // serve NXDOMAIN if no endpoint is able to answer
 			podsCount := 0
 			for _, ep := range endpointsListFunc() {
 				for _, eps := range ep.Subsets {
-					podsCount = podsCount + len(eps.Addresses)
+					podsCount += len(eps.Addresses)
 				}
 			}
 
@@ -429,19 +515,35 @@ func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.
 			}
 		}
 
+		// External service
+		if svc.Type == api.ServiceTypeExternalName {
+			//External services cannot have endpoints, so skip this service if an endpoint is present in the request
+			if r.endpoint != "" {
+				continue
+			}
+			s := msg.Service{Key: strings.Join([]string{zonePath, Svc, svc.Namespace, svc.Name}, "/"), Host: svc.ExternalName, TTL: k.ttl}
+			if t, _ := s.HostType(); t == dns.TypeCNAME {
+				s.Key = strings.Join([]string{zonePath, Svc, svc.Namespace, svc.Name}, "/")
+				services = append(services, s)
+
+				err = nil
+			}
+			continue
+		}
+
 		// Endpoint query or headless service
-		if svc.ClusterIP == api.ClusterIPNone || r.endpoint != "" {
+		if svc.Headless() || r.endpoint != "" {
 			if endpointsList == nil {
 				endpointsList = endpointsListFunc()
 			}
+
 			for _, ep := range endpointsList {
-				if ep.Name != svc.Name || ep.Namespace != svc.Namespace {
+				if object.EndpointsKey(svc.Name, svc.Namespace) != ep.Index {
 					continue
 				}
 
 				for _, eps := range ep.Subsets {
 					for _, addr := range eps.Addresses {
-
 						// See comments in parse.go parseRequest about the endpoint handling.
 						if r.endpoint != "" {
 							if !match(r.endpoint, endpointHostname(addr, k.endpointNameMode)) {
@@ -450,7 +552,7 @@ func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.
 						}
 
 						for _, p := range eps.Ports {
-							if !(match(r.port, p.Name) && match(r.protocol, string(p.Protocol))) {
+							if !(matchPortAndProtocol(r.port, p.Name, r.protocol, p.Protocol)) {
 								continue
 							}
 							s := msg.Service{Host: addr.IP, Port: int(p.Port), TTL: k.ttl}
@@ -466,49 +568,38 @@ func (k *Kubernetes) findServices(r recordRequest, zone string) (services []msg.
 			continue
 		}
 
-		// External service
-		if svc.Type == api.ServiceTypeExternalName {
-			s := msg.Service{Key: strings.Join([]string{zonePath, Svc, svc.Namespace, svc.Name}, "/"), Host: svc.ExternalName, TTL: k.ttl}
-			if t, _ := s.HostType(); t == dns.TypeCNAME {
-				s.Key = strings.Join([]string{zonePath, Svc, svc.Namespace, svc.Name}, "/")
-				services = append(services, s)
-
-				err = nil
-			}
-			continue
-		}
-
 		// ClusterIP service
 		for _, p := range svc.Ports {
-			if !(match(r.port, p.Name) && match(r.protocol, string(p.Protocol))) {
+			if !(matchPortAndProtocol(r.port, p.Name, r.protocol, string(p.Protocol))) {
 				continue
 			}
 
 			err = nil
 
-			s := msg.Service{Host: svc.ClusterIP, Port: int(p.Port), TTL: k.ttl}
-			s.Key = strings.Join([]string{zonePath, Svc, svc.Namespace, svc.Name}, "/")
-
-			services = append(services, s)
+			for _, ip := range svc.ClusterIPs {
+				s := msg.Service{Host: ip, Port: int(p.Port), TTL: k.ttl}
+				s.Key = strings.Join([]string{zonePath, Svc, svc.Namespace, svc.Name}, "/")
+				services = append(services, s)
+			}
 		}
 	}
 	return services, err
 }
 
-// match checks if a and b are equal taking wildcards into account.
+// Serial return the SOA serial.
+func (k *Kubernetes) Serial(state request.Request) uint32 { return uint32(k.APIConn.Modified(false)) }
+
+// MinTTL returns the minimal TTL.
+func (k *Kubernetes) MinTTL(state request.Request) uint32 { return k.ttl }
+
+// match checks if a and b are equal.
 func match(a, b string) bool {
-	if wildcard(a) {
-		return true
-	}
-	if wildcard(b) {
-		return true
-	}
 	return strings.EqualFold(a, b)
 }
 
-// wildcard checks whether s contains a wildcard value defined as "*" or "any".
-func wildcard(s string) bool {
-	return s == "*" || s == "any"
+// matchPortAndProtocol matches port and protocol, permitting the 'a' inputs to be wild
+func matchPortAndProtocol(aPort, bPort, aProtocol, bProtocol string) bool {
+	return (match(aPort, bPort) || aPort == "") && (match(aProtocol, bProtocol) || aProtocol == "")
 }
 
 const coredns = "c" // used as a fake key prefix in msg.Service

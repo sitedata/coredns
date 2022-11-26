@@ -1,4 +1,4 @@
-// +build etcd
+//go:build etcd
 
 package etcd
 
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/caddyserver/caddy"
+	"github.com/coredns/caddy"
 )
 
 func TestSetupEtcd(t *testing.T) {

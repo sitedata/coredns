@@ -6,10 +6,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-
-	"github.com/caddyserver/caddy"
 )
 
 func init() { plugin.Register("sign", setup) }
@@ -23,7 +22,7 @@ func setup(c *caddy.Controller) error {
 	c.OnStartup(sign.OnStartup)
 	c.OnStartup(func() error {
 		for _, signer := range sign.signers {
-			go signer.refresh(DurationRefreshHours)
+			go signer.refresh(durationRefreshHours)
 		}
 		return nil
 	})
@@ -51,25 +50,17 @@ func parse(c *caddy.Controller) (*Sign, error) {
 			dbfile = filepath.Join(config.Root, dbfile)
 		}
 
-		origins := make([]string, len(c.ServerBlockKeys))
-		copy(origins, c.ServerBlockKeys)
-		args := c.RemainingArgs()
-		if len(args) > 0 {
-			origins = args
-		}
-		for i := range origins {
-			origins[i] = plugin.Host(origins[i]).Normalize()
-		}
-
+		origins := plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 		signers := make([]*Signer, len(origins))
 		for i := range origins {
 			signers[i] = &Signer{
-				dbfile:     dbfile,
-				origin:     plugin.Host(origins[i]).Normalize(),
-				jitter:     time.Duration(float32(DurationJitter) * rand.Float32()),
-				directory:  "/var/lib/coredns",
-				stop:       make(chan struct{}),
-				signedfile: fmt.Sprintf("db.%ssigned", origins[i]), // origins[i] is a fqdn, so it ends with a dot, hence %ssigned.
+				dbfile:      dbfile,
+				origin:      origins[i],
+				jitterIncep: time.Duration(float32(durationInceptionJitter) * rand.Float32()),
+				jitterExpir: time.Duration(float32(durationExpirationDayJitter) * rand.Float32()),
+				directory:   "/var/lib/coredns",
+				stop:        make(chan struct{}),
+				signedfile:  fmt.Sprintf("db.%ssigned", origins[i]), // origins[i] is a fqdn, so it ends with a dot, hence %ssigned.
 			}
 		}
 

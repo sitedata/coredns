@@ -3,12 +3,10 @@ package pprof
 import (
 	"net"
 	"strconv"
-	"sync"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/plugin"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
-
-	"github.com/caddyserver/caddy"
 )
 
 var log = clog.NewWithPlugin("pprof")
@@ -59,15 +57,9 @@ func setup(c *caddy.Controller) error {
 				return plugin.Error("pprof", c.Errf("unknown property '%s'", c.Val()))
 			}
 		}
-
 	}
 
-	pprofOnce.Do(func() {
-		c.OnStartup(h.Startup)
-		c.OnShutdown(h.Shutdown)
-	})
-
+	c.OnStartup(h.Startup)
+	c.OnShutdown(h.Shutdown)
 	return nil
 }
-
-var pprofOnce sync.Once

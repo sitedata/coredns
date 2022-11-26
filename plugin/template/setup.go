@@ -2,13 +2,14 @@ package template
 
 import (
 	"regexp"
+	"strconv"
 	gotmpl "text/template"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 
-	"github.com/caddyserver/caddy"
 	"github.com/miekg/dns"
 )
 
@@ -17,10 +18,6 @@ func init() { plugin.Register("template", setupTemplate) }
 func setupTemplate(c *caddy.Controller) error {
 	handler, err := templateParse(c)
 	if err != nil {
-		return plugin.Error("template", err)
-	}
-
-	if err := setupMetrics(c); err != nil {
 		return plugin.Error("template", err)
 	}
 
@@ -36,7 +33,6 @@ func templateParse(c *caddy.Controller) (handler Handler, err error) {
 	handler.Templates = make([]template, 0)
 
 	for c.Next() {
-
 		if !c.NextArg() {
 			return handler, c.ArgErr()
 		}
@@ -53,16 +49,8 @@ func templateParse(c *caddy.Controller) (handler Handler, err error) {
 			return handler, c.Errf("invalid RR class %s", c.Val())
 		}
 
-		zones := c.RemainingArgs()
-		if len(zones) == 0 {
-			zones = make([]string, len(c.ServerBlockKeys))
-			copy(zones, c.ServerBlockKeys)
-		}
-		for i, str := range zones {
-			zones[i] = plugin.Host(str).Normalize()
-		}
+		zones := plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 		handler.Zones = append(handler.Zones, zones...)
-
 		t := template{qclass: class, qtype: qtype, zones: zones}
 
 		t.regex = make([]*regexp.Regexp, 0)
@@ -93,7 +81,7 @@ func templateParse(c *caddy.Controller) (handler Handler, err error) {
 					return handler, c.ArgErr()
 				}
 				for _, answer := range args {
-					tmpl, err := gotmpl.New("answer").Parse(answer)
+					tmpl, err := newTemplate("answer", answer)
 					if err != nil {
 						return handler, c.Errf("could not compile template: %s, %v", c.Val(), err)
 					}
@@ -106,7 +94,7 @@ func templateParse(c *caddy.Controller) (handler Handler, err error) {
 					return handler, c.ArgErr()
 				}
 				for _, additional := range args {
-					tmpl, err := gotmpl.New("additional").Parse(additional)
+					tmpl, err := newTemplate("additional", additional)
 					if err != nil {
 						return handler, c.Errf("could not compile template: %s, %v\n", c.Val(), err)
 					}
@@ -119,7 +107,7 @@ func templateParse(c *caddy.Controller) (handler Handler, err error) {
 					return handler, c.ArgErr()
 				}
 				for _, authority := range args {
-					tmpl, err := gotmpl.New("authority").Parse(authority)
+					tmpl, err := newTemplate("authority", authority)
 					if err != nil {
 						return handler, c.Errf("could not compile template: %s, %v\n", c.Val(), err)
 					}
@@ -135,6 +123,22 @@ func templateParse(c *caddy.Controller) (handler Handler, err error) {
 					return handler, c.Errf("unknown rcode %s", c.Val())
 				}
 				t.rcode = rcode
+
+			case "ederror":
+				args := c.RemainingArgs()
+				if len(args) != 1 && len(args) != 2 {
+					return handler, c.ArgErr()
+				}
+
+				code, err := strconv.ParseUint(args[0], 10, 16)
+				if err != nil {
+					return handler, c.Errf("error parsing extended DNS error code %s, %v\n", c.Val(), err)
+				}
+				if len(args) == 2 {
+					t.ederror = &ederror{code: uint16(code), reason: args[1]}
+				} else {
+					t.ederror = &ederror{code: uint16(code)}
+				}
 
 			case "fallthrough":
 				t.fall.SetZonesFromArgs(c.RemainingArgs())

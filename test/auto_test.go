@@ -1,7 +1,6 @@
 package test
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,18 +11,18 @@ import (
 
 func TestAuto(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
+	tmpdir, err := os.MkdirTemp(os.TempDir(), "coredns")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer os.RemoveAll(tmpdir)
 
 	corefile := `org:0 {
 		auto {
 			directory ` + tmpdir + ` db\.(.*) {1}
-			reload 1s
+			reload 0.01s
 		}
-	}
-`
+	}`
 
 	i, udp, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
@@ -42,11 +41,11 @@ func TestAuto(t *testing.T) {
 	}
 
 	// Write db.example.org to get example.org.
-	if err = ioutil.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(1500 * time.Millisecond) // wait for it to be picked up
+	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
 
 	resp, err = dns.Exchange(m, udp)
 	if err != nil {
@@ -59,7 +58,7 @@ func TestAuto(t *testing.T) {
 	// Remove db.example.org again.
 	os.Remove(filepath.Join(tmpdir, "db.example.org"))
 
-	time.Sleep(1100 * time.Millisecond) // wait for it to be picked up
+	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
 	resp, err = dns.Exchange(m, udp)
 	if err != nil {
 		t.Fatal("Expected to receive reply, but didn't")
@@ -71,19 +70,19 @@ func TestAuto(t *testing.T) {
 
 func TestAutoNonExistentZone(t *testing.T) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
+	tmpdir, err := os.MkdirTemp(os.TempDir(), "coredns")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer os.RemoveAll(tmpdir)
 
 	corefile := `.:0 {
 		auto {
 			directory ` + tmpdir + ` (.*) {1}
-			reload 1s
+			reload 0.01s
 		}
 		errors stdout
-	}
-`
+	}`
 
 	i, err := CoreDNSServer(corefile)
 	if err != nil {
@@ -110,19 +109,21 @@ func TestAutoNonExistentZone(t *testing.T) {
 func TestAutoAXFR(t *testing.T) {
 	t.Parallel()
 
-	tmpdir, err := ioutil.TempDir(os.TempDir(), "coredns")
+	tmpdir, err := os.MkdirTemp(os.TempDir(), "coredns")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer os.RemoveAll(tmpdir)
 
 	corefile := `org:0 {
 		auto {
 			directory ` + tmpdir + ` db\.(.*) {1}
-			reload 1s
-			transfer to *
+			reload 0.01s
 		}
-	}
-`
+		transfer {
+			to *
+		}
+	}`
 
 	i, err := CoreDNSServer(corefile)
 	if err != nil {
@@ -136,11 +137,11 @@ func TestAutoAXFR(t *testing.T) {
 	defer i.Stop()
 
 	// Write db.example.org to get example.org.
-	if err = ioutil.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmpdir, "db.example.org"), []byte(zoneContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(1100 * time.Millisecond) // wait for it to be picked up
+	time.Sleep(50 * time.Millisecond) // wait for it to be picked up
 
 	tr := new(dns.Transfer)
 	m := new(dns.Msg)
@@ -160,9 +161,9 @@ func TestAutoAXFR(t *testing.T) {
 }
 
 const zoneContent = `; testzone
-@	IN	SOA	sns.dns.icann.org. noc.dns.icann.org. 2016082534 7200 3600 1209600 3600
-		NS	a.iana-servers.net.
-		NS	b.iana-servers.net.
+@   IN SOA sns.dns.icann.org. noc.dns.icann.org. 2016082534 7200 3600 1209600 3600
+    IN NS  a.iana-servers.net.
+    IN NS  b.iana-servers.net.
 
-www IN A 127.0.0.1
+www IN A   127.0.0.1
 `

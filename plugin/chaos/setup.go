@@ -5,10 +5,9 @@ package chaos
 import (
 	"sort"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-
-	"github.com/caddyserver/caddy"
 )
 
 func init() { plugin.Register("chaos", setup) }
@@ -31,7 +30,7 @@ func parse(c *caddy.Controller) (string, []string, error) {
 	chaosVersion = caddy.AppName + "-" + caddy.AppVersion
 	version := ""
 
-	for c.Next() {
+	if c.Next() {
 		args := c.RemainingArgs()
 		if len(args) == 0 {
 			return trim(chaosVersion), Owners, nil

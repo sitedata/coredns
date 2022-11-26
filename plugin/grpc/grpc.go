@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"time"
 
 	"github.com/coredns/coredns/plugin"
@@ -87,7 +88,13 @@ func (g *GRPC) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 		return 0, nil
 	}
 
-	return 0, nil
+	// SERVFAIL if all healthy proxys returned errors.
+	if err != nil {
+		// just return the last error received
+		return dns.RcodeServerFailure, err
+	}
+
+	return dns.RcodeServerFailure, ErrNoHealthy
 }
 
 // NewGRPC returns a new GRPC.
@@ -129,3 +136,8 @@ func (g *GRPC) isAllowedDomain(name string) bool {
 func (g *GRPC) list() []*Proxy { return g.p.List(g.proxies) }
 
 const defaultTimeout = 5 * time.Second
+
+var (
+	// ErrNoHealthy means no healthy proxies left.
+	ErrNoHealthy = errors.New("no healthy gRPC proxies")
+)

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/pb"
+	"github.com/coredns/coredns/plugin/pkg/reuseport"
 	"github.com/coredns/coredns/plugin/pkg/transport"
 
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
@@ -20,6 +22,7 @@ import (
 // ServergRPC represents an instance of a DNS-over-gRPC server.
 type ServergRPC struct {
 	*Server
+	*pb.UnimplementedDnsServiceServer
 	grpcServer *grpc.Server
 	listenAddr net.Addr
 	tlsConfig  *tls.Config
@@ -32,15 +35,25 @@ func NewServergRPC(addr string, group []*Config) (*ServergRPC, error) {
 		return nil, err
 	}
 	// The *tls* plugin must make sure that multiple conflicting
-	// TLS configuration return an error: it can only be specified once.
+	// TLS configuration returns an error: it can only be specified once.
 	var tlsConfig *tls.Config
-	for _, conf := range s.zones {
-		// Should we error if some configs *don't* have TLS?
-		tlsConfig = conf.TLSConfig
+	for _, z := range s.zones {
+		for _, conf := range z {
+			// Should we error if some configs *don't* have TLS?
+			tlsConfig = conf.TLSConfig
+		}
+	}
+	// http/2 is required when using gRPC. We need to specify it in next protos
+	// or the upgrade won't happen.
+	if tlsConfig != nil {
+		tlsConfig.NextProtos = []string{"h2"}
 	}
 
 	return &ServergRPC{Server: s, tlsConfig: tlsConfig}, nil
 }
+
+// Compile-time check to ensure Server implements the caddy.GracefulServer interface
+var _ caddy.GracefulServer = &Server{}
 
 // Serve implements caddy.TCPServer interface.
 func (s *ServergRPC) Serve(l net.Listener) error {
@@ -71,8 +84,7 @@ func (s *ServergRPC) ServePacket(p net.PacketConn) error { return nil }
 
 // Listen implements caddy.TCPServer interface.
 func (s *ServergRPC) Listen() (net.Listener, error) {
-
-	l, err := net.Listen("tcp", s.Addr[len(transport.GRPC+"://"):])
+	l, err := reuseport.Listen("tcp", s.Addr[len(transport.GRPC+"://"):])
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +141,7 @@ func (s *ServergRPC) Query(ctx context.Context, in *pb.DnsPacket) (*pb.DnsPacket
 	w := &gRPCresponse{localAddr: s.listenAddr, remoteAddr: a, Msg: msg}
 
 	dnsCtx := context.WithValue(ctx, Key{}, s.Server)
+	dnsCtx = context.WithValue(dnsCtx, LoopKey{}, 0)
 	s.ServeDNS(dnsCtx, w, msg)
 
 	packed, err := w.Msg.Pack()

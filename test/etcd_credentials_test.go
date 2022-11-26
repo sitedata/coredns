@@ -1,4 +1,4 @@
-// +build etcd
+//go:build etcd
 
 package test
 
@@ -11,10 +11,10 @@ import (
 
 func TestEtcdCredentials(t *testing.T) {
 	corefile := `.:0 {
-    etcd skydns.test {
-        path /skydns
-    }
-}`
+		etcd skydns.test {
+			path /skydns
+		}
+	}`
 
 	ex, _, _, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {

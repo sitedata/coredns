@@ -2,21 +2,25 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/coredns/caddy"
+	"github.com/coredns/coredns/core/dnsserver"
+	"github.com/coredns/coredns/plugin"
 
 	"github.com/miekg/dns"
 )
 
 func TestReload(t *testing.T) {
 	corefile := `.:0 {
-	whoami
-}
-`
+		whoami
+	}`
+
 	coreInput := NewInput(corefile)
 
 	c, err := CoreDNSServer(corefile)
@@ -60,11 +64,11 @@ func send(t *testing.T, server string) {
 }
 
 func TestReloadHealth(t *testing.T) {
-	corefile := `
-.:0 {
-	health 127.0.0.1:52182
-	whoami
-}`
+	corefile := `.:0 {
+		health 127.0.0.1:52182
+		whoami
+	}`
+
 	c, err := CoreDNSServer(corefile)
 	if err != nil {
 		if strings.Contains(err.Error(), inUse) {
@@ -81,12 +85,12 @@ func TestReloadHealth(t *testing.T) {
 }
 
 func TestReloadMetricsHealth(t *testing.T) {
-	corefile := `
-.:0 {
-	prometheus 127.0.0.1:53183
-	health 127.0.0.1:53184
-	whoami
-}`
+	corefile := `.:0 {
+		prometheus 127.0.0.1:53183
+		health 127.0.0.1:53184
+		whoami
+	}`
+
 	c, err := CoreDNSServer(corefile)
 	if err != nil {
 		if strings.Contains(err.Error(), inUse) {
@@ -101,14 +105,12 @@ func TestReloadMetricsHealth(t *testing.T) {
 	}
 	defer c1.Stop()
 
-	time.Sleep(1 * time.Second)
-
 	// Health
 	resp, err := http.Get("http://localhost:53184/health")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok, _ := ioutil.ReadAll(resp.Body)
+	ok, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if string(ok) != http.StatusText(http.StatusOK) {
 		t.Errorf("Failed to receive OK, got %s", ok)
@@ -120,7 +122,7 @@ func TestReloadMetricsHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	const proc = "coredns_build_info"
-	metrics, _ := ioutil.ReadAll(resp.Body)
+	metrics, _ := io.ReadAll(resp.Body)
 	if !bytes.Contains(metrics, []byte(proc)) {
 		t.Errorf("Failed to see %s in metric output", proc)
 	}
@@ -132,7 +134,7 @@ func collectMetricsInfo(addr string, procs ...string) error {
 	if err != nil {
 		return err
 	}
-	metrics, _ := ioutil.ReadAll(resp.Body)
+	metrics, _ := io.ReadAll(resp.Body)
 	for _, p := range procs {
 		if !bytes.Contains(metrics, []byte(p)) {
 			return fmt.Errorf("failed to see %s in metric output \n%s", p, metrics)
@@ -154,15 +156,14 @@ func TestReloadSeveralTimeMetrics(t *testing.T) {
 	// that is not used in another test
 	promAddress := "127.0.0.1:53185"
 	proc := "coredns_build_info"
-	corefileWithMetrics := `
-	.:0 {
+	corefileWithMetrics := `.:0 {
 		prometheus ` + promAddress + `
 		whoami
 	}`
-	corefileWithoutMetrics := `
-	.:0 {
+	corefileWithoutMetrics := `.:0 {
 		whoami
 	}`
+
 	if err := collectMetricsInfo(promAddress, proc); err == nil {
 		t.Errorf("Prometheus is listening before the test started")
 	}
@@ -209,16 +210,16 @@ func TestMetricsAvailableAfterReload(t *testing.T) {
 	// that is not used in another test
 	promAddress := "127.0.0.1:53186"
 	procMetric := "coredns_build_info"
-	procCache := "coredns_cache_size"
+	procCache := "coredns_cache_entries"
 	procForward := "coredns_dns_request_duration_seconds"
-	corefileWithMetrics := `
-	.:0 {
+	corefileWithMetrics := `.:0 {
 		prometheus ` + promAddress + `
 		cache
 		forward . 8.8.8.8 {
-           force_tcp
+			force_tcp
 		}
 	}`
+
 	inst, _, tcp, err := CoreDNSServerAndPorts(corefileWithMetrics)
 	if err != nil {
 		if strings.Contains(err.Error(), inUse) {
@@ -263,25 +264,24 @@ func TestMetricsAvailableAfterReloadAndFailedReload(t *testing.T) {
 	// that is not used in another test
 	promAddress := "127.0.0.1:53187"
 	procMetric := "coredns_build_info"
-	procCache := "coredns_cache_size"
+	procCache := "coredns_cache_entries"
 	procForward := "coredns_dns_request_duration_seconds"
-	corefileWithMetrics := `
-	.:0 {
+	corefileWithMetrics := `.:0 {
 		prometheus ` + promAddress + `
 		cache
 		forward . 8.8.8.8 {
-           force_tcp
+			force_tcp
 		}
 	}`
-	invalidCorefileWithMetrics := `
-	.:0 {
+	invalidCorefileWithMetrics := `.:0 {
 		prometheus ` + promAddress + `
 		cache
 		forward . 8.8.8.8 {
-           force_tcp
+			force_tcp
 		}
 		invalid
 	}`
+
 	inst, _, tcp, err := CoreDNSServerAndPorts(corefileWithMetrics)
 	if err != nil {
 		if strings.Contains(err.Error(), inUse) {
@@ -330,6 +330,63 @@ func TestMetricsAvailableAfterReloadAndFailedReload(t *testing.T) {
 
 	instReload.Stop()
 	// verify that metrics have not been pushed
+}
+
+// TestReloadUnreadyPlugin tests that the ready plugin properly resets the list of readiness implementors during a reload.
+// If it fails to do so, ready will respond with duplicate plugin names after a reload (e.g. in this test "unready,unready").
+func TestReloadUnreadyPlugin(t *testing.T) {
+	// Add/Register a perpetually unready plugin
+	dnsserver.Directives = append([]string{"unready"}, dnsserver.Directives...)
+	u := new(unready)
+	plugin.Register("unready", func(c *caddy.Controller) error {
+		dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
+			u.next = next
+			return u
+		})
+		return nil
+	})
+
+	corefile := `.:0 {
+		unready
+        whoami
+        ready 127.0.0.1:53185
+	}`
+
+	coreInput := NewInput(corefile)
+
+	c, err := CoreDNSServer(corefile)
+	if err != nil {
+		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
+	}
+
+	c1, err := c.Restart(coreInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get("http://127.0.0.1:53185/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bod, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(bod) != u.Name() {
+		t.Errorf("Expected /ready endpoint response body %q, got %q", u.Name(), bod)
+	}
+
+	c1.Stop()
+}
+
+type unready struct {
+	next plugin.Handler
+}
+
+func (u *unready) Ready() bool { return false }
+
+func (u *unready) Name() string { return "unready" }
+
+func (u *unready) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	return u.next.ServeDNS(ctx, w, r)
 }
 
 const inUse = "address already in use"

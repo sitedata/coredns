@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/pkg/reuseport"
 	"github.com/coredns/coredns/plugin/pkg/uniq"
 )
 
@@ -30,7 +31,7 @@ type ready struct {
 }
 
 func (rd *ready) onStartup() error {
-	ln, err := net.Listen("tcp", rd.Addr)
+	ln, err := reuseport.Listen("tcp", rd.Addr)
 	if err != nil {
 		return err
 	}
@@ -42,6 +43,13 @@ func (rd *ready) onStartup() error {
 	rd.Unlock()
 
 	rd.mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+		rd.Lock()
+		defer rd.Unlock()
+		if !rd.done {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, "Shutting down")
+			return
+		}
 		ok, todo := plugins.Ready()
 		if ok {
 			w.WriteHeader(http.StatusOK)

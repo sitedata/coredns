@@ -3,11 +3,10 @@ package tls
 import (
 	ctls "crypto/tls"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/tls"
-
-	"github.com/caddyserver/caddy"
 )
 
 func init() { plugin.Register("tls", setup) }
@@ -18,23 +17,6 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("tls", err)
 	}
 	return nil
-}
-
-func setTLSDefaults(tls *ctls.Config) {
-	tls.MinVersion = ctls.VersionTLS12
-	tls.MaxVersion = ctls.VersionTLS13
-	tls.CipherSuites = []uint16{
-		ctls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-		ctls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-		ctls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-		ctls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-		ctls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		ctls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-		ctls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-		ctls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-		ctls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-	}
-	tls.PreferServerCipherSuites = true
 }
 
 func parseTLS(c *caddy.Controller) error {
@@ -82,8 +64,6 @@ func parseTLS(c *caddy.Controller) error {
 		tls.ClientAuth = clientAuth
 		// NewTLSConfigFromArgs only sets RootCAs, so we need to let ClientCAs refer to it.
 		tls.ClientCAs = tls.RootCAs
-
-		setTLSDefaults(tls)
 
 		config.TLSConfig = tls
 	}

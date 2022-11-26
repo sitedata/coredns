@@ -2,15 +2,13 @@ package root
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
-
-	"github.com/caddyserver/caddy"
 )
 
 func TestRoot(t *testing.T) {
@@ -25,7 +23,7 @@ func TestRoot(t *testing.T) {
 
 	nonExistingDir := filepath.Join(existingDirPath, "highly_unlikely_to_exist_dir")
 
-	existingFile, err := ioutil.TempFile("", "root_test")
+	existingFile, err := os.CreateTemp("", "root_test")
 	if err != nil {
 		t.Fatalf("BeforeTest: Failed to create temp file for testing! Error was: %v", err)
 	}

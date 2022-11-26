@@ -4,13 +4,11 @@ import (
 	"crypto/tls"
 	"fmt"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
-	"github.com/coredns/coredns/plugin/metrics"
 	"github.com/coredns/coredns/plugin/pkg/parse"
 	pkgtls "github.com/coredns/coredns/plugin/pkg/tls"
-
-	"github.com/caddyserver/caddy"
 )
 
 func init() { plugin.Register("grpc", setup) }
@@ -28,11 +26,6 @@ func setup(c *caddy.Controller) error {
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
 		g.Next = next // Set the Next field, so the plugin chaining works.
 		return g
-	})
-
-	c.OnStartup(func() error {
-		metrics.MustRegister(c, RequestCount, RcodeCount, RequestDuration)
-		return nil
 	})
 
 	return nil
@@ -63,7 +56,11 @@ func parseStanza(c *caddy.Controller) (*GRPC, error) {
 	if !c.Args(&g.from) {
 		return g, c.ArgErr()
 	}
-	g.from = plugin.Host(g.from).Normalize()
+	normalized := plugin.Host(g.from).NormalizeExact()
+	if len(normalized) == 0 {
+		return g, fmt.Errorf("unable to normalize '%s'", g.from)
+	}
+	g.from = normalized[0] // only the first is used.
 
 	to := c.RemainingArgs()
 	if len(to) == 0 {
@@ -99,7 +96,6 @@ func parseStanza(c *caddy.Controller) (*GRPC, error) {
 }
 
 func parseBlock(c *caddy.Controller, g *GRPC) error {
-
 	switch c.Val() {
 	case "except":
 		ignore := c.RemainingArgs()
@@ -107,9 +103,8 @@ func parseBlock(c *caddy.Controller, g *GRPC) error {
 			return c.ArgErr()
 		}
 		for i := 0; i < len(ignore); i++ {
-			ignore[i] = plugin.Host(ignore[i]).Normalize()
+			g.ignored = append(g.ignored, plugin.Host(ignore[i]).NormalizeExact()...)
 		}
-		g.ignored = ignore
 	case "tls":
 		args := c.RemainingArgs()
 		if len(args) > 3 {

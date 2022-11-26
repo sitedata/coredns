@@ -5,17 +5,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coredns/coredns/pb"
+
 	"github.com/miekg/dns"
 	"google.golang.org/grpc"
-
-	"github.com/coredns/coredns/pb"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestGrpc(t *testing.T) {
 	corefile := `grpc://.:0 {
 		whoami
-}
-`
+	}`
+
 	g, _, tcp, err := CoreDNSServerAndPorts(corefile)
 	if err != nil {
 		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
@@ -24,7 +25,7 @@ func TestGrpc(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(ctx, tcp, grpc.WithInsecure(), grpc.WithBlock())
+	conn, err := grpc.DialContext(ctx, tcp, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
 		t.Fatalf("Expected no error but got: %s", err)
 	}

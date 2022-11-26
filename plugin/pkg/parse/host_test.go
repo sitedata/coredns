@@ -1,7 +1,6 @@
 package parse
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -34,9 +33,34 @@ func TestHostPortOrFile(t *testing.T) {
 			"127.0.0.1:53",
 			false,
 		},
+		{
+			"fe80::1",
+			"[fe80::1]:53",
+			false,
+		},
+		{
+			"fe80::1%ens3",
+			"[fe80::1%ens3]:53",
+			false,
+		},
+		{
+			"[fd01::1]:153",
+			"[fd01::1]:153",
+			false,
+		},
+		{
+			"[fd01::1%ens3]:153",
+			"[fd01::1%ens3]:153",
+			false,
+		},
+		{
+			"8.9.1043",
+			"",
+			true,
+		},
 	}
 
-	err := ioutil.WriteFile("resolv.conf", []byte("nameserver 127.0.0.1\n"), 0600)
+	err := os.WriteFile("resolv.conf", []byte("nameserver 127.0.0.1\n"), 0600)
 	if err != nil {
 		t.Fatalf("Failed to write test resolv.conf")
 	}

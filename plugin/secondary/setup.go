@@ -1,14 +1,18 @@
 package secondary
 
 import (
+	"time"
+
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/file"
+	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/parse"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
-
-	"github.com/caddyserver/caddy"
 )
+
+var log = clog.NewWithPlugin("secondary")
 
 func init() { plugin.Register("secondary", setup) }
 
@@ -19,13 +23,28 @@ func setup(c *caddy.Controller) error {
 	}
 
 	// Add startup functions to retrieve the zone and keep it up to date.
-	for _, n := range zones.Names {
+	for i := range zones.Names {
+		n := zones.Names[i]
 		z := zones.Z[n]
 		if len(z.TransferFrom) > 0 {
 			c.OnStartup(func() error {
 				z.StartupOnce.Do(func() {
 					go func() {
-						z.TransferIn()
+						dur := time.Millisecond * 250
+						step := time.Duration(2)
+						max := time.Second * 10
+						for {
+							err := z.TransferIn()
+							if err == nil {
+								break
+							}
+							log.Warningf("All '%s' masters failed to transfer, retrying in %s: %s", n, dur.String(), err)
+							time.Sleep(dur)
+							dur = step * dur
+							if dur > max {
+								dur = max
+							}
+						}
 						z.Update()
 					}()
 				})
@@ -44,49 +63,34 @@ func setup(c *caddy.Controller) error {
 func secondaryParse(c *caddy.Controller) (file.Zones, error) {
 	z := make(map[string]*file.Zone)
 	names := []string{}
-	upstr := upstream.New()
 	for c.Next() {
-
 		if c.Val() == "secondary" {
 			// secondary [origin]
-			origins := make([]string, len(c.ServerBlockKeys))
-			copy(origins, c.ServerBlockKeys)
-			args := c.RemainingArgs()
-			if len(args) > 0 {
-				origins = args
-			}
+			origins := plugin.OriginsFromArgsOrServerBlock(c.RemainingArgs(), c.ServerBlockKeys)
 			for i := range origins {
-				origins[i] = plugin.Host(origins[i]).Normalize()
 				z[origins[i]] = file.NewZone(origins[i], "stdin")
 				names = append(names, origins[i])
 			}
 
 			for c.NextBlock() {
-
-				t, f := []string{}, []string{}
-				var e error
+				var f []string
 
 				switch c.Val() {
 				case "transfer":
-					t, f, e = parse.Transfer(c, true)
-					if e != nil {
-						return file.Zones{}, e
+					var err error
+					f, err = parse.TransferIn(c)
+					if err != nil {
+						return file.Zones{}, err
 					}
-				case "upstream":
-					// remove soon
-					c.RemainingArgs()
 				default:
 					return file.Zones{}, c.Errf("unknown property '%s'", c.Val())
 				}
 
 				for _, origin := range origins {
-					if t != nil {
-						z[origin].TransferTo = append(z[origin].TransferTo, t...)
-					}
 					if f != nil {
 						z[origin].TransferFrom = append(z[origin].TransferFrom, f...)
 					}
-					z[origin].Upstream = upstr
+					z[origin].Upstream = upstream.New()
 				}
 			}
 		}

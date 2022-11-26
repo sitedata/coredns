@@ -111,15 +111,11 @@ func (r *Request) RemoteAddr() string { return r.W.RemoteAddr().String() }
 func (r *Request) LocalAddr() string { return r.W.LocalAddr().String() }
 
 // Proto gets the protocol used as the transport. This will be udp or tcp.
-func (r *Request) Proto() string { return Proto(r.W) }
-
-// Proto gets the protocol used as the transport. This will be udp or tcp.
-func Proto(w dns.ResponseWriter) string {
-	// FIXME(miek): why not a method on Request
-	if _, ok := w.RemoteAddr().(*net.UDPAddr); ok {
+func (r *Request) Proto() string {
+	if _, ok := r.W.RemoteAddr().(*net.UDPAddr); ok {
 		return "udp"
 	}
-	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
+	if _, ok := r.W.RemoteAddr().(*net.TCPAddr); ok {
 		return "tcp"
 	}
 	return "udp"
@@ -148,7 +144,7 @@ func (r *Request) Family() int {
 	return 2
 }
 
-// Do returns if the request has the DO (DNSSEC OK) bit set.
+// Do returns true if the request has the DO (DNSSEC OK) bit set.
 func (r *Request) Do() bool {
 	if r.size != 0 {
 		return r.do
@@ -317,7 +313,6 @@ func (r *Request) Class() string {
 	}
 
 	return dns.Class(r.Req.Question[0].Qclass).String()
-
 }
 
 // QClass returns the class of the question in the request.
@@ -331,7 +326,6 @@ func (r *Request) QClass() uint16 {
 	}
 
 	return r.Req.Question[0].Qclass
-
 }
 
 // Clear clears all caching from Request s.
@@ -342,6 +336,8 @@ func (r *Request) Clear() {
 	r.port = ""
 	r.localPort = ""
 	r.family = 0
+	r.size = 0
+	r.do = false
 }
 
 // Match checks if the reply matches the qname and qtype from the request, it returns

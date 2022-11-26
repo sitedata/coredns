@@ -4,15 +4,14 @@ package coremain
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
-
-	"github.com/caddyserver/caddy"
 )
 
 func init() {
@@ -36,21 +35,6 @@ func init() {
 // Run is CoreDNS's main() function.
 func Run() {
 	caddy.TrapSignals()
-
-	// Reset flag.CommandLine to get rid of unwanted flags for instance from glog (used in kubernetes).
-	// And read the ones we want to keep.
-	flag.VisitAll(func(f *flag.Flag) {
-		if _, ok := flagsBlacklist[f.Name]; ok {
-			return
-		}
-		flagsToKeep = append(flagsToKeep, f)
-	})
-
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	for _, f := range flagsToKeep {
-		flag.Var(f.Value, f.Name, f.Usage)
-	}
-
 	flag.Parse()
 
 	if len(flag.Args()) > 0 {
@@ -112,7 +96,7 @@ func confLoader(serverType string) (caddy.Input, error) {
 		return caddy.CaddyfileFromPipe(os.Stdin, serverType)
 	}
 
-	contents, err := ioutil.ReadFile(conf)
+	contents, err := os.ReadFile(filepath.Clean(conf))
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +109,7 @@ func confLoader(serverType string) (caddy.Input, error) {
 
 // defaultLoader loads the Corefile from the current working directory.
 func defaultLoader(serverType string) (caddy.Input, error) {
-	contents, err := ioutil.ReadFile(caddy.DefaultConfigFile)
+	contents, err := os.ReadFile(caddy.DefaultConfigFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -139,21 +123,18 @@ func defaultLoader(serverType string) (caddy.Input, error) {
 	}, nil
 }
 
-// showVersion prints the version that is starting. We print our logo on the left.
+// showVersion prints the version that is starting.
 func showVersion() {
-	fmt.Println(logo[0])
 	fmt.Print(versionString())
 	fmt.Print(releaseString())
 	if devBuild && gitShortStat != "" {
 		fmt.Printf("%s\n%s\n", gitShortStat, gitFilesModified)
 	}
-	fmt.Println(logo[3])
-	fmt.Println(logo[4])
 }
 
 // versionString returns the CoreDNS version as a string.
 func versionString() string {
-	return fmt.Sprintf("%s\t%s%s-%s\n", logo[1], marker, caddy.AppName, caddy.AppVersion)
+	return fmt.Sprintf("%s-%s\n", caddy.AppName, caddy.AppVersion)
 }
 
 // releaseString returns the release information related to CoreDNS version:
@@ -161,7 +142,7 @@ func versionString() string {
 // e.g.,
 // linux/amd64, go1.8.3, a6d2d7b5
 func releaseString() string {
-	return fmt.Sprintf("%s\t%s%s/%s, %s, %s\n", logo[2], marker, runtime.GOOS, runtime.GOARCH, runtime.Version(), GitCommit)
+	return fmt.Sprintf("%s/%s, %s, %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version(), GitCommit)
 }
 
 // setVersion figures out the version information
@@ -189,6 +170,7 @@ var (
 
 // Build information obtained with the help of -ldflags
 var (
+	// nolint
 	appVersion = "(untracked dev build)" // inferred at startup
 	devBuild   = true                    // inferred at startup
 
@@ -201,16 +183,3 @@ var (
 	// Gitcommit contains the commit where we built CoreDNS from.
 	GitCommit string
 )
-
-// flagsBlacklist removes flags with these names from our flagset.
-var flagsBlacklist = map[string]struct{}{
-	"logtostderr":      {},
-	"alsologtostderr":  {},
-	"v":                {},
-	"stderrthreshold":  {},
-	"vmodule":          {},
-	"log_backtrace_at": {},
-	"log_dir":          {},
-}
-
-var flagsToKeep []*flag.Flag

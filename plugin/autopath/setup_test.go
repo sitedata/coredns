@@ -6,9 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/plugin/test"
-
-	"github.com/caddyserver/caddy"
 )
 
 func TestSetupAutoPath(t *testing.T) {
@@ -34,6 +33,7 @@ func TestSetupAutoPath(t *testing.T) {
 		// negative
 		{`autopath kubernetes`, true, "", "", nil, "open kubernetes: no such file or directory"},
 		{`autopath`, true, "", "", nil, "no resolv-conf"},
+		{`autopath ""`, true, "", "", nil, "no such file"},
 	}
 
 	for i, test := range tests {

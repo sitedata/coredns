@@ -2,13 +2,13 @@ package file
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coredns/coredns/plugin/test"
+	"github.com/coredns/coredns/plugin/transfer"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -29,9 +29,9 @@ func TestZoneReload(t *testing.T) {
 		t.Fatalf("Failed to parse zone: %s", err)
 	}
 
-	z.ReloadInterval = 500 * time.Millisecond
-	z.Reload()
-	time.Sleep(time.Second)
+	z.ReloadInterval = 10 * time.Millisecond
+	z.Reload(&transfer.Transfer{})
+	time.Sleep(20 * time.Millisecond)
 
 	ctx := context.TODO()
 	r := new(dns.Msg)
@@ -55,11 +55,11 @@ func TestZoneReload(t *testing.T) {
 	if len(rrs) != 5 {
 		t.Fatalf("Expected 5 RRs, got %d", len(rrs))
 	}
-	if err := ioutil.WriteFile(fileName, []byte(reloadZone2Test), 0644); err != nil {
+	if err := os.WriteFile(fileName, []byte(reloadZone2Test), 0644); err != nil {
 		t.Fatalf("Failed to write new zone data: %s", err)
 	}
 	// Could still be racy, but we need to wait a bit for the event to be seen
-	time.Sleep(1 * time.Second)
+	time.Sleep(30 * time.Millisecond)
 
 	rrs, err = z.ApexIfDefined()
 	if err != nil {
@@ -75,7 +75,6 @@ func TestZoneReloadSOAChange(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Zone should not have been re-parsed")
 	}
-
 }
 
 const reloadZoneTest = `miek.nl.		1627	IN	SOA	linode.atoom.net. miek.miek.nl. 1460175181 14400 3600 604800 14400

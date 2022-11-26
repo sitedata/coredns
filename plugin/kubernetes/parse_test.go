@@ -15,23 +15,23 @@ func TestParseRequest(t *testing.T) {
 	}{
 		// valid SRV request
 		{"_http._tcp.webs.mynamespace.svc.inter.webs.tests.", "http.tcp..webs.mynamespace.svc"},
-		// wildcard acceptance
-		{"*.any.*.any.svc.inter.webs.tests.", "*.any..*.any.svc"},
 		// A request of endpoint
-		{"1-2-3-4.webs.mynamespace.svc.inter.webs.tests.", "*.*.1-2-3-4.webs.mynamespace.svc"},
+		{"1-2-3-4.webs.mynamespace.svc.inter.webs.tests.", "..1-2-3-4.webs.mynamespace.svc"},
 		// bare zone
 		{"inter.webs.tests.", "....."},
 		// bare svc type
 		{"svc.inter.webs.tests.", "....."},
 		// bare pod type
 		{"pod.inter.webs.tests.", "....."},
+		// SRV request with empty segments
+		{"..webs.mynamespace.svc.inter.webs.tests.", "...webs.mynamespace.svc"},
 	}
 	for i, tc := range tests {
 		m := new(dns.Msg)
 		m.SetQuestion(tc.query, dns.TypeA)
 		state := request.Request{Zone: zone, Req: m}
 
-		r, e := parseRequest(state)
+		r, e := parseRequest(state.Name(), state.Zone)
 		if e != nil {
 			t.Errorf("Test %d, expected no error, got '%v'.", i, e)
 		}
@@ -53,7 +53,7 @@ func TestParseInvalidRequest(t *testing.T) {
 		m.SetQuestion(query, dns.TypeA)
 		state := request.Request{Zone: zone, Req: m}
 
-		if _, e := parseRequest(state); e == nil {
+		if _, e := parseRequest(state.Name(), state.Zone); e == nil {
 			t.Errorf("Test %d: expected error from %s, got none", i, query)
 		}
 	}
